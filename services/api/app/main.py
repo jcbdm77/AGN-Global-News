@@ -38,6 +38,17 @@ async def lifespan(app):
 app=FastAPI(title='AGN Global News API',version='0.3.0',lifespan=lifespan, docs_url=None if STAGING else '/docs', redoc_url=None if STAGING else '/redoc', openapi_url=None if STAGING else '/openapi.json')
 if STAGING: app.include_router(auth_router)
 
+# Never echo submitted credentials or article text in validation responses.
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError):
+    errors = [{'loc': list(error['loc']), 'msg': error['msg'], 'type': error['type']}
+              for error in exc.errors()]
+    return JSONResponse({'detail': errors}, status_code=422)
+
+
 @app.middleware('http')
 async def security_headers(request, call_next):
     private = STAGING and os.getenv('STAGING_PRIVATE_ACCESS') == 'required'

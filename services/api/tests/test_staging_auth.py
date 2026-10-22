@@ -95,6 +95,28 @@ with TestClient(main.app,base_url='https://localhost') as c:
     assert r.status_code==200,r.text
     assert c.get('/en').status_code==200
     assert c.get('/v1/articles').status_code==200
+    h={'X-CSRF-Token':r.json()['csrf_token']}
+    payload={'locale':'te','category':'Technology','slug':'staging-workflow-test','headline':'Staging workflow test','body':'Fictional test content for isolated workflow verification only.','source_url':'https://example.com/','source_publisher':'Test fixture'}
+    bad=dict(payload,slug='invalid slug')
+    invalid=c.post('/v1/editor/drafts',json=bad,headers=h)
+    assert invalid.status_code==422
+    assert all('input' not in e and 'ctx' not in e for e in invalid.json()['detail'])
+    created=c.post('/v1/editor/drafts',json=payload,headers=h)
+    assert created.status_code==201,created.text
+    eid=created.json()['edition_id']
+    assert c.get('/v1/articles?locale=te').json()==[]
+    payload['headline']='Updated staging workflow test'
+    assert c.put(f'/v1/editor/editions/{eid}',json=payload,headers=h).status_code==200
+    approval={'accuracy_reviewed':False,'rights_verified':True,'provenance_reviewed':True,'actor':'spoofed actor'}
+    assert c.post(f'/v1/editor/editions/{eid}/publish',json=approval,headers=h).status_code==409
+    approval['accuracy_reviewed']=True
+    assert c.post(f'/v1/editor/editions/{eid}/publish',json=approval).status_code==403
+    assert c.post(f'/v1/editor/editions/{eid}/publish',json=approval,headers=h).status_code==200
+    assert len(c.get('/v1/articles?locale=te').json())==1
+    events=c.get('/v1/editor/audit').json()
+    assert any(e['edition_id']==eid and e['action']=='published' and e['actor']=='admin' for e in events)
+    assert c.post(f'/v1/editor/editions/{eid}/retract',headers=h).status_code==200
+    assert c.get('/v1/articles?locale=te').json()==[]
     assert c.post('/auth/logout',headers={'X-CSRF-Token':r.json()['csrf_token']}).status_code==200
     assert c.get('/en').status_code==401
 '''
