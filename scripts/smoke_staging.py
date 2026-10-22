@@ -38,3 +38,19 @@ for service in ['postgres','api','https']:
     else:
         assert not any(bindings.values()), f'{service} exposes a host port'
 print('HTTPS, PostgreSQL, session authentication, CSRF/logout and loopback-only ports passed.')
+
+# This executes only in disposable CI containers, never against Render.
+legacy_check = """
+from sqlalchemy import text
+from app.database import engine
+from app.migrate import migrate, check_revision
+with engine.begin() as c:
+    before=c.scalar(text('SELECT count(*) FROM editions'))
+    c.execute(text('DROP TABLE alembic_version'))
+migrate(engine)
+with engine.connect() as c:
+    check_revision(c)
+    assert c.scalar(text('SELECT count(*) FROM editions'))==before
+print('Existing PostgreSQL schema adopted without losing editions.')
+"""
+subprocess.run(['docker','compose','-f','infra/staging/compose.yml','exec','-T','api','python','-c',legacy_check],check=True)

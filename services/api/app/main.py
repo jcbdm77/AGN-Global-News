@@ -24,7 +24,8 @@ STATIC=Path(__file__).parent/'static'
 @asynccontextmanager
 async def lifespan(app):
     if STAGING: initialize_admin()
-    Base.metadata.create_all(bind=engine) # prototype only; Alembic for production
+    from .migrate import migrate
+    migrate(engine)
     with SessionLocal() as session:
         if not session.scalar(select(func.count()).select_from(Edition)):
             story=Story(category='Technology', risk='demo');session.add(story);session.flush()
@@ -113,7 +114,14 @@ def serialize(e,full=False):
 @app.get('/ready')
 def ready(session:Session=Depends(db)):
     from sqlalchemy import text
-    session.execute(text('SELECT 1'))
+    from sqlalchemy.exc import SQLAlchemyError
+    from .migrate import check_revision
+    try:
+        session.execute(text('SELECT 1'))
+        check_revision(session.connection())
+    except (SQLAlchemyError, RuntimeError):
+        session.rollback()
+        raise HTTPException(503, 'Database is not ready') from None
     return {'ok': True}
 
 @app.get('/health')
