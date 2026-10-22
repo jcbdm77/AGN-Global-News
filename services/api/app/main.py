@@ -4,7 +4,7 @@ from pathlib import Path
 from html import escape
 import os, re, secrets
 from fastapi import FastAPI, Depends, HTTPException, Header, Response, Query, Request
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, HttpUrl
 from sqlalchemy import select, func
@@ -13,13 +13,17 @@ from .database import Base, engine, SessionLocal
 from .models import Story, Edition, Source, AuditEvent
 
 LOCALES={'en':'English','te':'తెలుగు','hi':'हिन्दी','ta':'தமிழ்','kn':'ಕನ್ನಡ','ml':'മലയാളം','mr':'मराठी','ur':'اردو'}
-from .auth import router as auth_router, session_guard, secret
+from .auth import router as auth_router, session_guard, secret, initialize_admin
 STAGING = os.getenv('APP_ENV') == 'staging'
+RENDER = os.getenv('RENDER') == 'true'
+if RENDER and (not STAGING or os.getenv('STAGING_PRIVATE_ACCESS') != 'required'):
+    raise RuntimeError('Render deployment requires authenticated staging access')
 ADMIN_TOKEN=secret('ADMIN_TOKEN')
 STATIC=Path(__file__).parent/'static'
 
 @asynccontextmanager
 async def lifespan(app):
+    if STAGING: initialize_admin()
     Base.metadata.create_all(bind=engine) # prototype only; Alembic for production
     with SessionLocal() as session:
         if not session.scalar(select(func.count()).select_from(Edition)):
@@ -36,7 +40,21 @@ if STAGING: app.include_router(auth_router)
 
 @app.middleware('http')
 async def security_headers(request, call_next):
-    response = await call_next(request)
+    private = STAGING and os.getenv('STAGING_PRIVATE_ACCESS') == 'required'
+    public_paths = {'/studio','/auth/login','/auth/session','/auth/logout','/health','/ready','/assets/site.css','/assets/studio.html'}
+    if private and request.url.path not in public_paths:
+        try:
+            session_guard(request)
+        except HTTPException as exc:
+            if request.method == 'GET' and 'text/html' in request.headers.get('accept', ''):
+                response = RedirectResponse('/studio', status_code=303)
+            else:
+                from fastapi.responses import JSONResponse
+                response = JSONResponse({'detail':exc.detail}, status_code=exc.status_code)
+        else:
+            response = await call_next(request)
+    else:
+        response = await call_next(request)
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['Referrer-Policy'] = 'no-referrer'
@@ -177,7 +195,7 @@ def robots():return Response('User-agent: *\nDisallow: /studio\nDisallow: /v1/ed
 
 @app.get('/sitemap.xml')
 def sitemap(session:Session=Depends(db)):
-    base=os.environ.get('PUBLIC_BASE_URL','http://localhost:8000').rstrip('/')
+    base=(os.environ.get('PUBLIC_BASE_URL') or os.environ.get('RENDER_EXTERNAL_URL','http://localhost:8000')).rstrip('/')
     editions=session.scalars(select(Edition).where(Edition.state=='published').limit(10000)).all()
     urls=''.join(f'<url><loc>{escape(base)}/{e.locale}/news/{escape(e.slug)}</loc></url>' for e in editions)
     return Response('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'+urls+'</urlset>',media_type='application/xml')
@@ -198,7 +216,7 @@ def article_page(locale:str,slug:str,session:Session=Depends(db)):
     template=(STATIC/'article.html').read_text(encoding='utf-8')
     safe_title=escape(e.headline)
     safe_body=''.join(f'<p>{escape(line)}</p>' for line in e.body.split('\n') if line.strip())
-    base=os.environ.get('PUBLIC_BASE_URL','http://localhost:8000').rstrip('/')
+    base=(os.environ.get('PUBLIC_BASE_URL') or os.environ.get('RENDER_EXTERNAL_URL','http://localhost:8000')).rstrip('/')
     canonical=f'{base}/{locale}/news/{slug}'
     date=e.published_at.isoformat() if e.published_at else ''
     import json

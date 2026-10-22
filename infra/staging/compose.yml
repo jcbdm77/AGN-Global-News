@@ -24,6 +24,7 @@ services:
     security_opt: [no-new-privileges:true]
     environment:
       APP_ENV: staging
+      STAGING_PRIVATE_ACCESS: required
       DATABASE_URL_FILE: /run/secrets/database_url
       STAGING_ADMIN_HASH_FILE: /run/secrets/admin_hash
       STAGING_ADMIN_USER: admin

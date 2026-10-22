@@ -20,11 +20,12 @@ def call(path, data=None, csrf=None):
     except urllib.error.HTTPError as e: return e.code, None
 
 assert call('/ready')[0] == 200
-assert call('/v1/articles?locale=en')[0] == 200
+assert call('/v1/articles?locale=en')[0] == 401
 assert call('/v1/editor/stats')[0] == 401
 status, login = call('/auth/login', {'username':'admin','password':Path('/tmp/agn-ci-password').read_text()})
 assert status == 200, f'Login failed: HTTP {status}'
 assert call('/v1/editor/stats')[0] == 200
+assert call('/v1/articles?locale=en')[0] == 200
 assert call('/v1/editor/drafts', {})[0] == 403
 assert call('/auth/logout', {}, login['csrf_token'])[0] == 200
 assert call('/v1/editor/stats')[0] == 401

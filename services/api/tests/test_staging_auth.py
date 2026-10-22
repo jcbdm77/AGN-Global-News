@@ -69,3 +69,33 @@ with TestClient(main.app,base_url='https://localhost') as c:
     assert c.get('/en').headers['x-robots-tag']=='noindex, nofollow'
 '''
     subprocess.run([sys.executable, '-c', program], check=True)
+
+def test_render_generated_password_and_whole_site_gate():
+    import subprocess, sys
+    program = '''
+import os
+os.environ.update(APP_ENV='staging',RENDER='true',STAGING_PRIVATE_ACCESS='required',STAGING_ADMIN_PASSWORD='dummy-test-only-generated-secret-1234567890',DATABASE_URL='postgresql://unused:unused@localhost/unused')
+os.environ.pop('STAGING_ADMIN_HASH',None)
+os.environ.pop('STAGING_ADMIN_HASH_FILE',None)
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
+from fastapi.testclient import TestClient
+from app import main
+assert main.engine.dialect.driver == 'psycopg'
+main.engine=create_engine('sqlite://',connect_args={'check_same_thread':False},poolclass=StaticPool)
+main.SessionLocal.configure(bind=main.engine)
+with TestClient(main.app,base_url='https://localhost') as c:
+    assert c.get('/ready').status_code==200
+    for path in ['/en','/v1/articles','/sitemap.xml','/assets/article.html']:
+        assert c.get(path).status_code==401,path
+    assert c.get('/en',headers={'Accept':'text/html'},follow_redirects=False).status_code==303
+    assert c.get('/studio').status_code==200
+    assert c.get('/assets/site.css').status_code==200
+    r=c.post('/auth/login',json={'username':'admin','password':os.environ['STAGING_ADMIN_PASSWORD']})
+    assert r.status_code==200,r.text
+    assert c.get('/en').status_code==200
+    assert c.get('/v1/articles').status_code==200
+    assert c.post('/auth/logout',headers={'X-CSRF-Token':r.json()['csrf_token']}).status_code==200
+    assert c.get('/en').status_code==401
+'''
+    subprocess.run([sys.executable,'-c',program],check=True)

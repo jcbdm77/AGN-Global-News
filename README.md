@@ -88,3 +88,44 @@ provenance, and rights review. There are no licensed feeds or AI auto-publishing
 
 The Windows launcher and `infra/docker-compose.yml` are retained for original
 local development only. They must not be used as VPS staging configuration.
+
+
+## Render staging proposal (not applied)
+
+`render.yaml` proposes one free Docker web service and the smallest paid
+PostgreSQL compute plan with 1 GB storage, both in Singapore. Auto-deployment
+and database storage autoscaling are disabled. Database external connections
+are blocked with an empty IP allow list; the application uses the internal URL.
+The free web service can sleep and restart, which invalidates in-memory sessions.
+Upgrade decisions require separate owner approval.
+
+This differs from the VPS tunnel: Render exposes an HTTPS sign-in page publicly,
+but all news pages, article APIs and editorial APIs require authentication.
+Only sign-in, session/logout handlers, static sign-in styles and health checks
+are accessible before authentication. This is application-restricted staging,
+not network-private hosting. It must not be described as a public news launch.
+
+Render generates `STAGING_ADMIN_PASSWORD`; it is never checked into GitHub or
+sent in chat. Retrieve it privately in the service Environment settings when
+signing in as `admin`. The app derives an scrypt hash in memory at startup.
+The app refuses Render startup unless staging and whole-site protection are
+explicitly enabled. PostgreSQL URLs are normalized to the psycopg driver.
+
+Paid Render PostgreSQL includes point-in-time recovery (3 days on Hobby,
+7 days on Pro or higher). Validate the actual recovery settings and restore
+path after provisioning. Off-provider archival copies remain a separate task.
+The VPS backup container is not automatically deployed by this Blueprint.
+
+Estimated baseline: $0 free web compute + $6/month database compute + up to
+$0.30/month for 1 GB database storage (confirm any included storage credit).
+Taxes, exchange rates and overage charges are additional; this is not a hard
+spending cap. No paid workspace upgrade, custom domain or DNS change is proposed.
+Do not apply until the owner approves billing and the public sign-in surface.
+
+The proposed changes remain on `staging-preparation` in draft PR #1. Render
+Blueprint setup must explicitly use that branch; default main still contains
+the original archive. Do not use the generic default-branch deployment link.
+Blueprint application and platform-aware validation have not been run. Schema
+validation and tests are recorded in the pull request. A Render deployment must
+still be inspected for healthy startup, inaccessible unauthenticated content,
+secure cookies, generated credentials and internal-only database connectivity.

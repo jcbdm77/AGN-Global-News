@@ -21,6 +21,26 @@ def secret(name):
     return Path(filename).read_text().strip() if filename else os.getenv(name, '')
 
 
+
+_generated_hash = ''
+
+def admin_hash():
+    return secret('STAGING_ADMIN_HASH') or _generated_hash
+
+def initialize_admin():
+    """Accept a platform-generated secret without storing it in source or logs."""
+    global _generated_hash
+    if secret('STAGING_ADMIN_HASH'):
+        configured()
+        return
+    password = secret('STAGING_ADMIN_PASSWORD')
+    if len(password) < 32:
+        raise RuntimeError('Configure a generated staging administrator secret')
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1, dklen=32).hex()
+    _generated_hash = f'scrypt${salt.hex()}${digest}'
+
+
 def verify_password(password, encoded):
     try:
         kind, salt, expected = encoded.split('$')
@@ -33,7 +53,7 @@ def verify_password(password, encoded):
 
 
 def configured():
-    if len(secret('STAGING_ADMIN_HASH').split('$')) != 3:
+    if len(admin_hash().split('$')) != 3:
         raise HTTPException(503, 'Staging administrator is not configured')
 
 
@@ -70,7 +90,7 @@ def login(payload: Login, request: Request, response: Response):
         if count >= 5:
             raise HTTPException(429, 'Too many attempts; retry in five minutes')
         _attempts[key] = (count + 1, until)
-    valid_password = verify_password(payload.password, secret('STAGING_ADMIN_HASH'))
+    valid_password = verify_password(payload.password, admin_hash())
     if not (secrets.compare_digest(payload.username, os.getenv('STAGING_ADMIN_USER', 'admin')) and valid_password):
         raise HTTPException(401, 'Invalid sign-in')
     token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)

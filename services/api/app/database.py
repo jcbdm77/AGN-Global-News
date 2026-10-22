@@ -4,6 +4,10 @@ import os
 
 from .auth import secret
 DATABASE_URL = secret('DATABASE_URL') or 'sqlite:///./agn.db'
+if DATABASE_URL.startswith('postgresql://'):
+    DATABASE_URL = DATABASE_URL.replace('postgresql://', 'postgresql+psycopg://', 1)
+elif DATABASE_URL.startswith('postgres://'):
+    DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql+psycopg://', 1)
 if os.getenv('APP_ENV') == 'staging' and not DATABASE_URL.startswith('postgresql'):
     raise RuntimeError('Staging requires PostgreSQL')
 connect_args = {'check_same_thread': False} if DATABASE_URL.startswith('sqlite') else {}
