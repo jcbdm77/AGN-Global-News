@@ -20,9 +20,12 @@ jobs:
       - name: Generate disposable CI credentials
         run: |
           sudo python3 - <<'PY'
-          import getpass, runpy, secrets
+          import getpass, runpy, secrets, os
+          from pathlib import Path
           password=secrets.token_urlsafe(32)
           getpass.getpass=lambda prompt: password
+          Path('/tmp/agn-ci-password').write_text(password)
+          os.chmod('/tmp/agn-ci-password',0o600)
           runpy.run_path('scripts/prepare_staging.py',run_name='__main__')
           PY
       - name: Build and start isolated staging
@@ -30,16 +33,10 @@ jobs:
         run: |
           docker compose -f compose.yml config --quiet
           docker compose -f compose.yml up -d --build --wait --wait-timeout 180
-      - name: Verify HTTPS and PostgreSQL
-        working-directory: infra/staging
+      - name: Verify HTTPS, PostgreSQL and private access
         run: |
-          docker compose -f compose.yml cp https:/data/caddy/pki/authorities/local/root.crt /tmp/agn-root.crt
-          curl --fail --retry 10 --retry-connrefused --retry-delay 2 --cacert /tmp/agn-root.crt https://localhost:8443/ready
-          curl --fail --cacert /tmp/agn-root.crt https://localhost:8443/v1/articles?locale=en
-          test "$(curl -s -o /dev/null -w '%{http_code}' --cacert /tmp/agn-root.crt https://localhost:8443/v1/editor/stats)" = 401
-          test -z "$(docker compose -f compose.yml port postgres 5432 2>/dev/null || true)"
-          test -z "$(docker compose -f compose.yml port api 8000 2>/dev/null || true)"
-          test "$(docker compose -f compose.yml port https 443)" = '127.0.0.1:8443'
+          docker compose -f infra/staging/compose.yml cp https:/data/caddy/pki/authorities/local/root.crt /tmp/agn-root.crt
+          sudo python3 scripts/smoke_staging.py
       - name: Create encrypted backup and test disposable restore
         run: |
           docker compose -f infra/staging/compose.yml run --rm backup --once
