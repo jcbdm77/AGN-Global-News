@@ -18,7 +18,11 @@ def test_fresh_schema_and_repeat_startup():
 
 def test_adopt_legacy_schema_without_changing_data():
     engine = create_engine('sqlite://')
-    Base.metadata.create_all(engine)
+    from app.migrate import configuration
+    from alembic import command
+    with engine.begin() as connection:
+        command.upgrade(configuration(connection), '0001_initial')
+        connection.execute(text('DROP TABLE alembic_version'))
     with engine.begin() as connection:
         connection.execute(models.Story.__table__.insert().values(id=42, category='Test', risk='demo'))
     migrate(engine)

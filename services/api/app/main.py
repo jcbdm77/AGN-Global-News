@@ -157,7 +157,7 @@ def stats(session:Session=Depends(db)):
     return {'counts':{k:v for k,v in rows},'languages':len(LOCALES),'total':sum(v for k,v in rows)}
 
 @app.post('/v1/editor/drafts',status_code=201,dependencies=[Depends(editor_guard)])
-def create_draft(p:DraftPayload,session:Session=Depends(db)):
+def create_draft(p:DraftPayload,request:Request,session:Session=Depends(db)):
     if p.locale not in LOCALES:raise HTTPException(400,'Unsupported language')
     if session.scalar(select(Edition.id).where(Edition.locale==p.locale,Edition.slug==p.slug)):
         raise HTTPException(409,'Slug already exists for this language')
@@ -165,11 +165,11 @@ def create_draft(p:DraftPayload,session:Session=Depends(db)):
     e=Edition(story_id=story.id,locale=p.locale,slug=p.slug,headline=p.headline,body=p.body,state='draft')
     session.add(e);session.flush()
     session.add(Source(edition_id=e.id,publisher=p.source_publisher,url=str(p.source_url)))
-    session.add(AuditEvent(edition_id=e.id,actor='editor',action='created'))
+    session.add(AuditEvent(edition_id=e.id,actor=session_guard(request)['actor'] if STAGING else 'editor',action='created'))
     session.commit();return {'edition_id':e.id,'state':'draft'}
 
 @app.put('/v1/editor/editions/{eid}',dependencies=[Depends(editor_guard)])
-def update_draft(eid:int,p:UpdateDraft,session:Session=Depends(db)):
+def update_draft(eid:int,p:UpdateDraft,request:Request,session:Session=Depends(db)):
     e=session.get(Edition,eid)
     if not e:raise HTTPException(404,'Not found')
     if e.state!='draft':raise HTTPException(409,'Only drafts may be changed')
@@ -179,7 +179,7 @@ def update_draft(eid:int,p:UpdateDraft,session:Session=Depends(db)):
     e.locale=p.locale;e.slug=p.slug;e.headline=p.headline;e.body=p.body;e.story.category=p.category
     source=session.scalar(select(Source).where(Source.edition_id==eid))
     if source:source.publisher=p.source_publisher;source.url=str(p.source_url);source.rights_status='unverified'
-    session.add(AuditEvent(edition_id=eid,actor='editor',action='edited'))
+    session.add(AuditEvent(edition_id=eid,actor=session_guard(request)['actor'] if STAGING else 'editor',action='edited'))
     session.commit();return {'edition_id':eid,'state':'draft'}
 
 @app.post('/v1/editor/editions/{eid}/publish',dependencies=[Depends(editor_guard)])
@@ -194,11 +194,11 @@ def publish(eid:int,p:Approval,request:Request,session:Session=Depends(db)):
     session.commit();return {'edition_id':eid,'state':'published'}
 
 @app.post('/v1/editor/editions/{eid}/retract',dependencies=[Depends(editor_guard)])
-def retract(eid:int,session:Session=Depends(db)):
+def retract(eid:int,request:Request,session:Session=Depends(db)):
     e=session.get(Edition,eid)
     if not e:raise HTTPException(404,'Not found')
     if e.state!='published':raise HTTPException(409,'Only published articles can be retracted')
-    e.state='retracted';session.add(AuditEvent(edition_id=eid,actor='editor',action='retracted'))
+    e.state='retracted';session.add(AuditEvent(edition_id=eid,actor=session_guard(request)['actor'] if STAGING else 'editor',action='retracted'))
     session.commit();return {'edition_id':eid,'state':'retracted'}
 
 @app.get('/v1/editor/audit',dependencies=[Depends(editor_guard)])

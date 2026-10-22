@@ -1,17 +1,14 @@
-"""Single-admin staging sessions; in-memory state requires one API worker."""
+"""Single-admin staging authentication with durable, hashed sessions."""
 import hashlib
 import os
 import secrets
-import threading
+import hmac
 import time
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix='/auth')
-_sessions = {}
-_attempts = {}
-_lock = threading.Lock()
 COOKIE = 'agn_session'
 TTL = 3600
 
@@ -57,16 +54,66 @@ def configured():
         raise HTTPException(503, 'Staging administrator is not configured')
 
 
+def credential_version():
+    # Stable across restarts, revoked automatically when credentials change.
+    material = secret('STAGING_ADMIN_HASH') or secret('STAGING_ADMIN_PASSWORD')
+    return hashlib.sha256((os.getenv('STAGING_ADMIN_USER', 'admin') + ':' + material).encode()).hexdigest()
+
+
+def token_hash(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def csrf_for(token):
+    return hmac.new(credential_version().encode(), token.encode(), hashlib.sha256).hexdigest()
+
+
 def session_guard(request: Request):
-    now = time.monotonic()
-    with _lock:
-        item = _sessions.get(request.cookies.get(COOKIE, ''))
-        if not item or item['expires'] <= now:
+    cached = getattr(request.state, 'agn_identity', None)
+    if cached is not None:
+        return cached
+    from .database import SessionLocal
+    from .models import AuthSession
+    token = request.cookies.get(COOKIE, '')
+    if len(token) != 43:
+        raise HTTPException(401, 'Sign in required')
+    with SessionLocal() as db:
+        item = db.get(AuthSession, token_hash(token))
+        if not item or item.expires_at <= time.time() or not secrets.compare_digest(item.credential_version, credential_version()):
             raise HTTPException(401, 'Sign in required')
+        csrf = csrf_for(token)
         if request.method not in ('GET', 'HEAD', 'OPTIONS'):
-            if not secrets.compare_digest(request.headers.get('x-csrf-token', ''), item['csrf']):
+            if not secrets.compare_digest(request.headers.get('x-csrf-token', ''), csrf):
                 raise HTTPException(403, 'Invalid CSRF token')
-        return item
+        identity = {'csrf': csrf, 'actor': item.actor}
+        request.state.agn_identity = identity
+        return identity
+
+
+def record_attempt(request):
+    """Atomic shared limit survives restarts; forwarding headers are untrusted."""
+    from sqlalchemy import case, delete
+    from .database import SessionLocal
+    from .models import AuthAttempt
+    key = token_hash(request.client.host if request.client else 'unknown')
+    now = time.time()
+    with SessionLocal.begin() as db:
+        dialect = db.bind.dialect.name
+        if dialect == 'postgresql':
+            from sqlalchemy.dialects.postgresql import insert
+        else:
+            from sqlalchemy.dialects.sqlite import insert
+        stmt = insert(AuthAttempt).values(bucket_hash=key, attempts=1, expires_at=now + 300)
+        expired = AuthAttempt.expires_at <= now
+        stmt = stmt.on_conflict_do_update(index_elements=['bucket_hash'], set_={
+            'attempts': case((expired, 1), else_=AuthAttempt.attempts + 1),
+            'expires_at': case((expired, now + 300), else_=AuthAttempt.expires_at),
+        }).returning(AuthAttempt.attempts)
+        count = db.execute(stmt).scalar_one()
+        db.execute(delete(AuthAttempt).where(AuthAttempt.expires_at < now))
+    if count > 5:
+        raise HTTPException(429, 'Too many attempts; retry in five minutes')
+    return key
 
 
 class Login(BaseModel):
@@ -77,28 +124,27 @@ class Login(BaseModel):
 @router.post('/login')
 def login(payload: Login, request: Request, response: Response):
     configured()
-    # Do not trust caller-supplied forwarding headers. The staging proxy is the
-    # single rate-limit bucket; five failed attempts block all login attempts.
-    key = request.client.host if request.client else 'unknown'
-    now = time.monotonic()
-    with _lock:
-        for old in [k for k, v in _sessions.items() if v['expires'] <= now]:
-            del _sessions[old]
-        for old in [k for k, v in _attempts.items() if v[1] <= now]:
-            del _attempts[old]
-        count, until = _attempts.get(key, (0, now + 300))
-        if count >= 5:
-            raise HTTPException(429, 'Too many attempts; retry in five minutes')
-        _attempts[key] = (count + 1, until)
+    key = record_attempt(request)
     valid_password = verify_password(payload.password, admin_hash())
     if not (secrets.compare_digest(payload.username, os.getenv('STAGING_ADMIN_USER', 'admin')) and valid_password):
         raise HTTPException(401, 'Invalid sign-in')
-    token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-    with _lock:
-        _attempts.pop(key, None)
-        if len(_sessions) >= 20:
-            _sessions.pop(next(iter(_sessions)))
-        _sessions[token] = {'csrf': csrf, 'expires': now + TTL, 'actor': payload.username}
+    from sqlalchemy import delete, select
+    from .database import SessionLocal
+    from .models import AuthSession, AuthAttempt
+    token = secrets.token_urlsafe(32)
+    csrf = csrf_for(token)
+    with SessionLocal.begin() as db:
+        db.execute(delete(AuthAttempt).where(AuthAttempt.bucket_hash == key))
+        db.execute(delete(AuthSession).where(AuthSession.expires_at <= time.time()))
+        # Rotate a cookie that already belongs to this browser on sign-in.
+        previous = request.cookies.get(COOKIE, '')
+        if previous:
+            db.execute(delete(AuthSession).where(AuthSession.token_hash == token_hash(previous)))
+        active = db.scalars(select(AuthSession).order_by(AuthSession.expires_at)).all()
+        for old in active[:-19] if len(active) >= 20 else []:
+            db.delete(old)
+        db.add(AuthSession(token_hash=token_hash(token), actor=payload.username,
+                           credential_version=credential_version(), expires_at=time.time() + TTL))
     response.set_cookie(COOKIE, token, max_age=TTL, secure=True, httponly=True, samesite='strict', path='/')
     response.headers['Cache-Control'] = 'no-store'
     return {'csrf_token': csrf}
@@ -114,7 +160,10 @@ def session(request: Request, response: Response):
 @router.post('/logout')
 def logout(request: Request, response: Response):
     session_guard(request)
-    with _lock:
-        _sessions.pop(request.cookies.get(COOKIE, ''), None)
+    from sqlalchemy import delete
+    from .database import SessionLocal
+    from .models import AuthSession
+    with SessionLocal.begin() as db:
+        db.execute(delete(AuthSession).where(AuthSession.token_hash == token_hash(request.cookies.get(COOKIE, ''))))
     response.delete_cookie(COOKIE, secure=True, httponly=True, samesite='strict', path='/')
     return {'ok': True}

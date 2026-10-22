@@ -44,3 +44,19 @@ class AuditEvent(Base):
     actor: Mapped[str] = mapped_column(String(150))
     action: Mapped[str] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+# Only token hashes persist; browser session tokens never enter the database.
+from sqlalchemy import Float
+
+class AuthSession(Base):
+    __tablename__ = 'auth_sessions'
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    actor: Mapped[str] = mapped_column(String(100))
+    credential_version: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[float] = mapped_column(Float, index=True)
+
+class AuthAttempt(Base):
+    __tablename__ = 'auth_attempts'
+    bucket_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    attempts: Mapped[int] = mapped_column()
+    expires_at: Mapped[float] = mapped_column(Float)

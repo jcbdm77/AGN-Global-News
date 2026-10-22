@@ -26,6 +26,20 @@ status, login = call('/auth/login', {'username':'admin','password':Path('/tmp/ag
 assert status == 200, f'Login failed: HTTP {status}'
 assert call('/v1/editor/stats')[0] == 200
 assert call('/v1/articles?locale=en')[0] == 200
+# Restart only the disposable CI API, proving cookie and CSRF persistence.
+subprocess.run(['docker','compose','-f','infra/staging/compose.yml','restart','api'],check=True)
+import time
+for _ in range(60):
+    try:
+        if call('/ready')[0] == 200:
+            break
+    except (OSError, urllib.error.URLError):
+        pass
+    time.sleep(1)
+else:
+    raise AssertionError('API did not become ready after restart')
+assert call('/auth/session')[1]['csrf_token'] == login['csrf_token']
+assert call('/v1/editor/stats')[0] == 200
 assert call('/v1/editor/drafts', {})[0] == 403
 assert call('/auth/logout', {}, login['csrf_token'])[0] == 200
 assert call('/v1/editor/stats')[0] == 401
@@ -46,6 +60,8 @@ from app.database import engine
 from app.migrate import migrate, check_revision
 with engine.begin() as c:
     before=c.scalar(text('SELECT count(*) FROM editions'))
+    c.execute(text('DROP TABLE auth_sessions'))
+    c.execute(text('DROP TABLE auth_attempts'))
     c.execute(text('DROP TABLE alembic_version'))
 migrate(engine)
 with engine.connect() as c:

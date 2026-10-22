@@ -6,7 +6,7 @@ Staging uses the free Render Docker web service and the paid 1 GB PostgreSQL ins
 
 Startup runs the checked-in Alembic revisions in one transaction. PostgreSQL uses a transaction-scoped advisory lock and a ten-second lock timeout. The initial adoption compares the existing schema with the frozen initial revision and refuses unknown or incomplete schemas. Existing articles are not rebuilt or copied. Do not stamp revisions manually to bypass a mismatch. Test subsequent schema revisions against a restored backup before deployment.
 
-The /ready endpoint verifies database connectivity and the current migration revision. Render already monitors this endpoint. /health is a process liveness check and does not prove database readiness. No custom email/SMS alert recipient has been configured; account notification settings determine delivery of Render notices. Free service sleep and in-memory session resets remain expected.
+The /ready endpoint verifies database connectivity and the current migration revision. Render already monitors this endpoint. /health is a process liveness check and does not prove database readiness. No custom email/SMS alert recipient has been configured; account notification settings determine delivery of Render notices. Free service sleep remains expected. Sessions and failed-login throttles now persist in PostgreSQL. Session cookies expire after one hour; changing the configured administrator credential invalidates them. Only token hashes are stored.
 
 ## Deployment and rollback
 
@@ -20,4 +20,4 @@ Scheduled off-provider backups are not configured: a private destination and nar
 
 ## Remaining launch requirements
 
-Individual identities, role-based permissions, MFA/account recovery, durable sessions, monitoring alert delivery, scheduled off-provider backups, and editorial/legal review are still required before a production release. No custom DNS, public news launch, mobile-store submission, or new paid service is authorized by this configuration.
+Individual identities, role-based permissions, MFA/account recovery, monitoring alert delivery, scheduled off-provider backups, and editorial/legal review are still required before a production release. No custom DNS, public news launch, mobile-store submission, or new paid service is authorized by this configuration.

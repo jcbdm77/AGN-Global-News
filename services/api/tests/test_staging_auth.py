@@ -3,7 +3,7 @@ import os
 import pytest
 from fastapi import FastAPI, Depends
 from fastapi.testclient import TestClient
-from app.auth import router, session_guard, _sessions, _attempts
+from app.auth import router, session_guard
 
 @pytest.fixture
 def client(monkeypatch):
@@ -12,7 +12,14 @@ def client(monkeypatch):
     digest = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1, dklen=32).hex()
     monkeypatch.setenv('STAGING_ADMIN_HASH', f'scrypt${salt.hex()}${digest}')
     monkeypatch.setenv('STAGING_ADMIN_USER', 'admin')
-    _sessions.clear(); _attempts.clear()
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+    from app import database
+    from app.migrate import migrate
+    engine = create_engine('sqlite://', connect_args={'check_same_thread':False}, poolclass=StaticPool)
+    migrate(engine)
+    monkeypatch.setattr(database, 'SessionLocal', sessionmaker(bind=engine, expire_on_commit=False))
     app = FastAPI(); app.include_router(router)
     @app.post('/protected', dependencies=[Depends(session_guard)])
     def protected(): return {'ok':True}
@@ -39,7 +46,11 @@ def test_failed_login_throttled(client):
 
 def test_expired_session(client):
     client.post('/auth/login',json={'username':'admin','password':'a-long-staging-test-password'})
-    for entry in _sessions.values(): entry['expires'] = 0
+    from app.database import SessionLocal
+    from app.models import AuthSession
+    from sqlalchemy import update
+    with SessionLocal.begin() as db:
+        db.execute(update(AuthSession).values(expires_at=0))
     assert client.get('/auth/session').status_code == 401
 
 def test_staging_app_disables_development_token(tmp_path):
@@ -117,7 +128,43 @@ with TestClient(main.app,base_url='https://localhost') as c:
     assert any(e['edition_id']==eid and e['action']=='published' and e['actor']=='admin' for e in events)
     assert c.post(f'/v1/editor/editions/{eid}/retract',headers=h).status_code==200
     assert c.get('/v1/articles?locale=te').json()==[]
+    assert all(e['actor']=='admin' for e in c.get('/v1/editor/audit').json() if e['edition_id']==eid)
     assert c.post('/auth/logout',headers={'X-CSRF-Token':r.json()['csrf_token']}).status_code==200
     assert c.get('/en').status_code==401
 '''
     subprocess.run([sys.executable,'-c',program],check=True)
+
+def test_session_storage_hashes_and_credential_rotation(client, monkeypatch):
+    from app.database import SessionLocal
+    from app.models import AuthSession
+    from app.auth import COOKIE, token_hash
+    from sqlalchemy import select
+    r=client.post('/auth/login',json={'username':'admin','password':'a-long-staging-test-password'})
+    assert r.status_code==200
+    token=client.cookies.get(COOKIE)
+    with SessionLocal() as db:
+        row=db.scalar(select(AuthSession))
+        assert row.token_hash==token_hash(token)
+        assert row.token_hash != token
+    monkeypatch.setenv('STAGING_ADMIN_HASH','scrypt$'+'b'*32+'$'+'c'*64)
+    assert client.get('/auth/session').status_code==401
+
+
+def test_sessions_survive_new_database_session_factory(client, monkeypatch):
+    from app import database
+    from sqlalchemy.orm import sessionmaker
+    r=client.post('/auth/login',json={'username':'admin','password':'a-long-staging-test-password'})
+    engine=database.SessionLocal.kw['bind']
+    monkeypatch.setattr(database,'SessionLocal',sessionmaker(bind=engine,expire_on_commit=False))
+    assert client.get('/auth/session').json()['csrf_token']==r.json()['csrf_token']
+
+
+def test_expired_throttle_resets(client):
+    from app.database import SessionLocal
+    from app.models import AuthAttempt
+    from sqlalchemy import update
+    for _ in range(5):
+        client.post('/auth/login',json={'username':'admin','password':'wrong'})
+    with SessionLocal.begin() as db:
+        db.execute(update(AuthAttempt).values(expires_at=0))
+    assert client.post('/auth/login',json={'username':'admin','password':'a-long-staging-test-password'}).status_code==200
