@@ -1,0 +1,27 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: agn
+      POSTGRES_USER: agn
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in infra/.env}
+    volumes:
+      - agn_pgdata_v02:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agn"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+  api:
+    build: ../services/api
+    environment:
+      DATABASE_URL: postgresql+psycopg://agn:${POSTGRES_PASSWORD}@postgres:5432/agn
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN in infra/.env}
+      PUBLIC_BASE_URL: http://localhost:8000
+    ports:
+      - '8000:8000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+volumes:
+  agn_pgdata_v02:

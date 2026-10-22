@@ -1,0 +1,51 @@
+name: Private staging checks
+on:
+  pull_request:
+  push:
+    branches: [staging-preparation]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r services/api/requirements.lock
+      - run: python -m pytest -q
+        working-directory: services/api
+      - name: Generate disposable CI credentials
+        run: |
+          sudo python3 - <<'PY'
+          import getpass, runpy, secrets
+          password=secrets.token_urlsafe(32)
+          getpass.getpass=lambda prompt: password
+          runpy.run_path('scripts/prepare_staging.py',run_name='__main__')
+          PY
+      - name: Build and start isolated staging
+        working-directory: infra/staging
+        run: |
+          docker compose -f compose.yml config --quiet
+          docker compose -f compose.yml up -d --build --wait --wait-timeout 180
+      - name: Verify HTTPS and PostgreSQL
+        working-directory: infra/staging
+        run: |
+          docker compose -f compose.yml cp https:/data/caddy/pki/authorities/local/root.crt /tmp/agn-root.crt
+          curl --fail --retry 10 --retry-connrefused --retry-delay 2 --cacert /tmp/agn-root.crt https://localhost:8443/ready
+          curl --fail --cacert /tmp/agn-root.crt https://localhost:8443/v1/articles?locale=en
+          test "$(curl -s -o /dev/null -w '%{http_code}' --cacert /tmp/agn-root.crt https://localhost:8443/v1/editor/stats)" = 401
+          test -z "$(docker compose -f compose.yml port postgres 5432 2>/dev/null || true)"
+          test -z "$(docker compose -f compose.yml port api 8000 2>/dev/null || true)"
+          test "$(docker compose -f compose.yml port https 443)" = '127.0.0.1:8443'
+      - name: Create encrypted backup and test disposable restore
+        run: |
+          docker compose -f infra/staging/compose.yml run --rm backup --once
+          archive=$(sudo find "$PWD/infra/staging/backups" -name '*.dump.gpg' -type f | sort | tail -1)
+          test -n "$archive"
+          sudo sh scripts/restore_staging.sh "$archive"
+      - name: Cleanup disposable containers
+        if: always()
+        run: docker compose -f infra/staging/compose.yml down -v
