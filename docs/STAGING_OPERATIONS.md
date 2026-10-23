@@ -20,4 +20,16 @@ Scheduled off-provider backups are not configured: a private destination and nar
 
 ## Remaining launch requirements
 
-Individual identities, role-based permissions, MFA/account recovery, monitoring alert delivery, scheduled off-provider backups, and editorial/legal review are still required before a production release. No custom DNS, public news launch, mobile-store submission, or new paid service is authorized by this configuration.
+Owner MFA enrollment, final staff access review, monitoring alert delivery, scheduled off-provider backups, and editorial/legal review are still required before a production release. No custom DNS, public news launch, mobile-store submission, or new paid service is authorized by this configuration.
+
+## Named accounts and MFA
+
+The existing owner account remains the bootstrap administrator. Visit Studio → Account security & staff, enter the owner password, add the private setup key to an authenticator, and confirm a fresh code. Save the ten one-use recovery codes privately; they are shown once. Confirmation revokes existing sessions, so sign in again using a new authenticator code (wait for the next 30-second code) or an unused recovery code. Owner enrollment is not performed automatically by deployment.
+
+Owner MFA is required before inviting, disabling or resetting staff. Each management action requires the owner password and a fresh MFA code or unused recovery code. An invitation lasts 24 hours and its secret is stored only as a hash. Staff choose a password of at least 16 characters and must enroll an authenticator before activation. Staff cannot invite other staff or grant owner permissions. The app does not send invitation emails; the owner shares activation links through a verified private channel. Reset access revokes sessions and old factors, disables the account, and produces a new one-use activation link.
+
+Editors create/edit drafts, reviewers publish/retract, and viewers read. The owner can perform all editorial actions. Backend checks enforce these permissions even if someone alters browser controls.
+
+AUTH_ENCRYPTION_KEY encrypts authenticator secrets. Preserve this key privately and separately from database exports. Losing it prevents MFA decryption; do not overwrite it during a redeploy. An environment key change is not a safe rotation procedure. Restore tests for encrypted MFA data require the original key. Recovery codes are hashed, consumed atomically, and always require the password; OTP counters reject replay. Login and enrollment confirmation are throttled. Owner recovery requires the saved recovery codes or an independently reviewed server recovery procedure; there is no unauthenticated bypass.
+
+The staff/MFA acceptance suite runs with disposable credentials against SQLite and native PostgreSQL in CI. It never enrolls the real owner or creates real staff accounts on Render.

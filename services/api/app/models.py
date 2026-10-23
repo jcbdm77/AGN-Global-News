@@ -60,3 +60,20 @@ class AuthAttempt(Base):
     bucket_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     attempts: Mapped[int] = mapped_column()
     expires_at: Mapped[float] = mapped_column(Float)
+
+from sqlalchemy import BigInteger
+
+class StaffAccount(Base):
+    __tablename__ = 'staff_accounts'
+    username: Mapped[str] = mapped_column(String(100), primary_key=True)
+    password_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    role: Mapped[str] = mapped_column(String(20))
+    active: Mapped[bool] = mapped_column(Boolean, default=False)
+    version: Mapped[str] = mapped_column(String(64))
+    invite_hash: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
+    invite_expires: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mfa_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mfa_pending: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mfa_pending_expires: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mfa_counter: Mapped[int] = mapped_column(BigInteger, default=-1)
+    recovery_hashes: Mapped[str] = mapped_column(Text, default='[]')

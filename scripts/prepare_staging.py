@@ -1,7 +1,7 @@
 """Run ON THE TARGET SERVER interactively. Never prints generated secrets."""
 from getpass import getpass
 from pathlib import Path
-import hashlib, os, secrets
+import hashlib, os, secrets, base64
 
 root = Path(__file__).resolve().parents[1] / 'infra/staging'
 folder = root / 'secrets'
@@ -13,7 +13,7 @@ if len(password) < 16 or password != getpass('Confirm password: '):
 salt = secrets.token_bytes(16)
 digest = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1, dklen=32).hex()
 db = secrets.token_hex(32)
-values = {'admin_hash': f'scrypt${salt.hex()}${digest}', 'db_password': db,
+values = {'auth_encryption_key':base64.urlsafe_b64encode(secrets.token_bytes(32)).decode(), 'admin_hash': f'scrypt${salt.hex()}${digest}', 'db_password': db,
           'database_url': f'postgresql+psycopg://agn:{db}@postgres:5432/agn',
           'backup_passphrase': secrets.token_urlsafe(48)}
 folder.mkdir(mode=0o700)
@@ -22,7 +22,7 @@ for name, value in values.items():
     with os.fdopen(fd, 'w') as f: f.write(value + '\n')
 # Compose file secrets retain host permissions. Permit the non-root API reader
 # through its numeric group; the parent directory remains accessible only to owner.
-for name in ('admin_hash','database_url'):
+for name in ('admin_hash','database_url','auth_encryption_key'):
     try: os.chown(folder / name, -1, 10001)
     except PermissionError: raise SystemExit('Run setup with sudo so API secret permissions can be assigned.')
     os.chmod(folder / name, 0o640)

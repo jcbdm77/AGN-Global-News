@@ -26,6 +26,9 @@ async def lifespan(app):
     if STAGING: initialize_admin()
     from .migrate import migrate
     migrate(engine)
+    if STAGING:
+        from .accounts import ensure_admin
+        ensure_admin()
     with SessionLocal() as session:
         if not session.scalar(select(func.count()).select_from(Edition)):
             story=Story(category='Technology', risk='demo');session.add(story);session.flush()
@@ -37,7 +40,10 @@ async def lifespan(app):
     yield
 
 app=FastAPI(title='AGN Global News API',version='0.3.0',lifespan=lifespan, docs_url=None if STAGING else '/docs', redoc_url=None if STAGING else '/redoc', openapi_url=None if STAGING else '/openapi.json')
-if STAGING: app.include_router(auth_router)
+if STAGING:
+    app.include_router(auth_router)
+    from .accounts import router as account_router
+    app.include_router(account_router)
 
 # Never echo submitted credentials or article text in validation responses.
 from fastapi.exceptions import RequestValidationError
@@ -53,7 +59,7 @@ async def validation_error(request: Request, exc: RequestValidationError):
 @app.middleware('http')
 async def security_headers(request, call_next):
     private = STAGING and os.getenv('STAGING_PRIVATE_ACCESS') == 'required'
-    public_paths = {'/studio','/auth/login','/auth/session','/auth/logout','/health','/ready','/assets/site.css','/assets/studio.html'}
+    public_paths = {'/studio','/auth/login','/auth/session','/auth/logout','/health','/ready','/assets/site.css','/assets/studio.html','/activate','/assets/account.html','/auth/activate/start','/auth/activate/confirm'}
     if private and request.url.path not in public_paths:
         try:
             session_guard(request)
@@ -83,7 +89,12 @@ def db():
 
 def editor_guard(request: Request, authorization:str|None=Header(default=None)):
     if STAGING:
-        return session_guard(request)
+        from .accounts import require_roles
+        if request.method in ('GET','HEAD'):
+            return require_roles(request,'admin','editor','reviewer','viewer')
+        if request.url.path.endswith(('/publish','/retract')):
+            return require_roles(request,'admin','reviewer')
+        return require_roles(request,'admin','editor')
     if not ADMIN_TOKEN or ADMIN_TOKEN.startswith('replace-'):
         raise HTTPException(503,'Configure ADMIN_TOKEN in infra/.env')
     if not authorization or not secrets.compare_digest(authorization,f'Bearer {ADMIN_TOKEN}'):
@@ -205,6 +216,9 @@ def retract(eid:int,request:Request,session:Session=Depends(db)):
 def audit(session:Session=Depends(db)):
     rows=session.scalars(select(AuditEvent).order_by(AuditEvent.id.desc()).limit(50)).all()
     return [{'edition_id':x.edition_id,'actor':x.actor,'action':x.action,'at':x.created_at.isoformat() if x.created_at else ''} for x in rows]
+
+@app.get('/activate',response_class=HTMLResponse)
+def activate():return (STATIC/'account.html').read_text(encoding='utf-8')
 
 @app.get('/studio',response_class=HTMLResponse)
 def studio():return (STATIC/'studio.html').read_text(encoding='utf-8')

@@ -73,29 +73,31 @@ def session_guard(request: Request):
     if cached is not None:
         return cached
     from .database import SessionLocal
-    from .models import AuthSession
+    from .models import AuthSession, StaffAccount
+    from .accounts import account_version
     token = request.cookies.get(COOKIE, '')
     if len(token) != 43:
         raise HTTPException(401, 'Sign in required')
     with SessionLocal() as db:
         item = db.get(AuthSession, token_hash(token))
-        if not item or item.expires_at <= time.time() or not secrets.compare_digest(item.credential_version, credential_version()):
+        user = db.get(StaffAccount, item.actor) if item else None
+        if not item or not user or not user.active or item.expires_at <= time.time() or not secrets.compare_digest(item.credential_version, account_version(user)):
             raise HTTPException(401, 'Sign in required')
         csrf = csrf_for(token)
         if request.method not in ('GET', 'HEAD', 'OPTIONS'):
             if not secrets.compare_digest(request.headers.get('x-csrf-token', ''), csrf):
                 raise HTTPException(403, 'Invalid CSRF token')
-        identity = {'csrf': csrf, 'actor': item.actor}
+        identity = {'csrf': csrf, 'actor': item.actor, 'role': user.role, 'mfa_enabled':bool(user.mfa_secret)}
         request.state.agn_identity = identity
         return identity
 
 
-def record_attempt(request):
+def record_attempt(request, scope='login'):
     """Atomic shared limit survives restarts; forwarding headers are untrusted."""
     from sqlalchemy import case, delete
     from .database import SessionLocal
     from .models import AuthAttempt
-    key = token_hash(request.client.host if request.client else 'unknown')
+    key = token_hash(scope + ':' + (request.client.host if request.client else 'unknown'))
     now = time.time()
     with SessionLocal.begin() as db:
         dialect = db.bind.dialect.name
@@ -119,42 +121,51 @@ def record_attempt(request):
 class Login(BaseModel):
     username: str = Field(min_length=1, max_length=100, pattern=r'^[a-zA-Z0-9_.-]+$')
     password: str = Field(max_length=256)
+    otp: str = Field(default='', max_length=100)
 
 
 @router.post('/login')
 def login(payload: Login, request: Request, response: Response):
     configured()
     key = record_attempt(request)
-    valid_password = verify_password(payload.password, admin_hash())
-    if not (secrets.compare_digest(payload.username, os.getenv('STAGING_ADMIN_USER', 'admin')) and valid_password):
-        raise HTTPException(401, 'Invalid sign-in')
     from sqlalchemy import delete, select
     from .database import SessionLocal
-    from .models import AuthSession, AuthAttempt
+    from .models import AuthSession, AuthAttempt, StaffAccount
+    from .accounts import ensure_admin, password_valid, use_factor, account_version
+    ensure_admin()
     token = secrets.token_urlsafe(32)
     csrf = csrf_for(token)
     with SessionLocal.begin() as db:
+        user = db.scalar(select(StaffAccount).where(StaffAccount.username == payload.username).with_for_update())
+        valid = password_valid(user, payload.password) if user else verify_password(payload.password, admin_hash()) and False
+        if not user or not user.active or not valid:
+            raise HTTPException(401, 'Invalid sign-in or verification code')
+        if user.username != os.getenv('STAGING_ADMIN_USER', 'admin') and not user.mfa_secret:
+            raise HTTPException(401, 'Account activation is incomplete')
+        if not use_factor(db, user, payload.otp):
+            raise HTTPException(401, 'Invalid sign-in or verification code')
         db.execute(delete(AuthAttempt).where(AuthAttempt.bucket_hash == key))
         db.execute(delete(AuthSession).where(AuthSession.expires_at <= time.time()))
-        # Rotate a cookie that already belongs to this browser on sign-in.
         previous = request.cookies.get(COOKIE, '')
         if previous:
             db.execute(delete(AuthSession).where(AuthSession.token_hash == token_hash(previous)))
-        active = db.scalars(select(AuthSession).order_by(AuthSession.expires_at)).all()
+        active = db.scalars(select(AuthSession).where(AuthSession.actor==user.username).order_by(AuthSession.expires_at)).all()
         for old in active[:-19] if len(active) >= 20 else []:
             db.delete(old)
-        db.add(AuthSession(token_hash=token_hash(token), actor=payload.username,
-                           credential_version=credential_version(), expires_at=time.time() + TTL))
+        db.add(AuthSession(token_hash=token_hash(token), actor=user.username,
+                           credential_version=account_version(user), expires_at=time.time() + TTL))
+        role=user.role
+        mfa_enabled=bool(user.mfa_secret)
     response.set_cookie(COOKIE, token, max_age=TTL, secure=True, httponly=True, samesite='strict', path='/')
     response.headers['Cache-Control'] = 'no-store'
-    return {'csrf_token': csrf}
+    return {'csrf_token': csrf, 'role':role, 'mfa_enabled':mfa_enabled}
 
 
 @router.get('/session')
 def session(request: Request, response: Response):
     item = session_guard(request)
     response.headers['Cache-Control'] = 'no-store'
-    return {'csrf_token': item['csrf']}
+    return {'csrf_token': item['csrf'], 'role':item['role'], 'username':item['actor'], 'mfa_enabled':item['mfa_enabled']}
 
 
 @router.post('/logout')

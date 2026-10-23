@@ -60,6 +60,7 @@ from app.database import engine
 from app.migrate import migrate, check_revision
 with engine.begin() as c:
     before=c.scalar(text('SELECT count(*) FROM editions'))
+    c.execute(text('DROP TABLE staff_accounts'))
     c.execute(text('DROP TABLE auth_sessions'))
     c.execute(text('DROP TABLE auth_attempts'))
     c.execute(text('DROP TABLE alembic_version'))
@@ -70,3 +71,11 @@ with engine.connect() as c:
 print('Existing PostgreSQL schema adopted without losing editions.')
 """
 subprocess.run(['docker','compose','-f','infra/staging/compose.yml','exec','-T','api','python','-c',legacy_check],check=True)
+
+# Reuse the complete acceptance flow against this disposable PostgreSQL instance.
+import ast
+suite=ast.parse(Path('services/api/tests/test_accounts.py').read_text())
+check=next(node for node in suite.body if isinstance(node,ast.FunctionDef))
+program=next(node.value.value for node in check.body if isinstance(node,ast.Assign) and isinstance(node.value,ast.Constant) and isinstance(node.value.value,str))
+subprocess.run(['docker','compose','-f','infra/staging/compose.yml','exec','-T','-e','AGN_NATIVE_ACCOUNT_CHECK=1','api','python','-c',program],check=True)
+print('Native PostgreSQL staff activation, roles, MFA, recovery and revocation checks passed.')

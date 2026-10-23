@@ -28,8 +28,9 @@ services:
       DATABASE_URL_FILE: /run/secrets/database_url
       STAGING_ADMIN_HASH_FILE: /run/secrets/admin_hash
       STAGING_ADMIN_USER: admin
+      AUTH_ENCRYPTION_KEY_FILE: /run/secrets/auth_encryption_key
       PUBLIC_BASE_URL: https://localhost:8443
-    secrets: [database_url, admin_hash]
+    secrets: [database_url, admin_hash, auth_encryption_key]
     depends_on:
       postgres: {condition: service_healthy}
     healthcheck:
@@ -62,6 +63,7 @@ secrets:
   db_password: {file: ./secrets/db_password}
   database_url: {file: ./secrets/database_url}
   admin_hash: {file: ./secrets/admin_hash}
+  auth_encryption_key: {file: ./secrets/auth_encryption_key}
   backup_passphrase: {file: ./secrets/backup_passphrase}
 volumes:
   pgdata:

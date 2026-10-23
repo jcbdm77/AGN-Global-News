@@ -24,6 +24,8 @@ services:
         fromDatabase:
           name: agn-staging-db
           property: connectionString
+      - key: AUTH_ENCRYPTION_KEY
+        sync: false
       - key: WEB_CONCURRENCY
         value: '1'
 databases:
