@@ -15,22 +15,33 @@ from .models import Story, Edition, Source, AuditEvent
 LOCALES={'en':'English','te':'తెలుగు','hi':'हिन्दी','ta':'தமிழ்','kn':'ಕನ್ನಡ','ml':'മലയാളം','mr':'मराठी','ur':'اردو'}
 from .auth import router as auth_router, session_guard, secret, initialize_admin
 STAGING = os.getenv('APP_ENV') == 'staging'
+PRODUCTION = os.getenv('APP_ENV') == 'production'
+MANAGED_AUTH = STAGING or PRODUCTION
+PUBLIC_READER = PRODUCTION and os.getenv('PUBLIC_READER_ENABLED') == 'true'
+if PUBLIC_READER:
+    from urllib.parse import urlparse
+    public_url = urlparse(os.getenv('PUBLIC_BASE_URL', ''))
+    if os.getenv('PUBLIC_LAUNCH_APPROVAL') != 'approved' or public_url.scheme != 'https' or not public_url.hostname or public_url.username or public_url.password or public_url.query or public_url.fragment or public_url.path not in ('', '/'):
+        raise RuntimeError('Public reader requires explicit launch approval and an HTTPS base URL')
 RENDER = os.getenv('RENDER') == 'true'
-if RENDER and (not STAGING or os.getenv('STAGING_PRIVATE_ACCESS') != 'required'):
+if RENDER and (not MANAGED_AUTH or (STAGING and os.getenv('STAGING_PRIVATE_ACCESS') != 'required')):
     raise RuntimeError('Render deployment requires authenticated staging access')
 ADMIN_TOKEN=secret('ADMIN_TOKEN')
 STATIC=Path(__file__).parent/'static'
 
 @asynccontextmanager
 async def lifespan(app):
-    if STAGING: initialize_admin()
+    if MANAGED_AUTH: initialize_admin()
+    if PRODUCTION:
+        from .accounts import cipher
+        cipher()  # Fail startup if the persistent MFA encryption key is missing or invalid.
     from .migrate import migrate
     migrate(engine)
-    if STAGING:
+    if MANAGED_AUTH:
         from .accounts import ensure_admin
         ensure_admin()
     with SessionLocal() as session:
-        if not session.scalar(select(func.count()).select_from(Edition)):
+        if not PRODUCTION and not session.scalar(select(func.count()).select_from(Edition)):
             story=Story(category='Technology', risk='demo');session.add(story);session.flush()
             demo=Edition(story_id=story.id,locale='en',slug='welcome-to-agn-demo',headline='Welcome to AGN — your global newsroom',body='DEMONSTRATION ARTICLE — NOT REAL NEWS. This sample story demonstrates the AGN publishing experience. Open AGN Studio to create your own draft, review the source and rights information, and publish it on the website. The demo is not a report about any real-world event.',state='published',provenance_reviewed=True,published_at=datetime.now(timezone.utc))
             session.add(demo);session.flush()
@@ -39,8 +50,8 @@ async def lifespan(app):
             session.commit()
     yield
 
-app=FastAPI(title='AGN Global News API',version='0.3.0',lifespan=lifespan, docs_url=None if STAGING else '/docs', redoc_url=None if STAGING else '/redoc', openapi_url=None if STAGING else '/openapi.json')
-if STAGING:
+app=FastAPI(title='AGN Global News API',version='0.3.0',lifespan=lifespan, docs_url=None if MANAGED_AUTH else '/docs', redoc_url=None if MANAGED_AUTH else '/redoc', openapi_url=None if MANAGED_AUTH else '/openapi.json')
+if MANAGED_AUTH:
     app.include_router(auth_router)
     from .accounts import router as account_router
     app.include_router(account_router)
@@ -58,9 +69,12 @@ async def validation_error(request: Request, exc: RequestValidationError):
 
 @app.middleware('http')
 async def security_headers(request, call_next):
-    private = STAGING and os.getenv('STAGING_PRIVATE_ACCESS') == 'required'
+    protect_routes = PRODUCTION or (STAGING and os.getenv('STAGING_PRIVATE_ACCESS') == 'required')
     public_paths = {'/studio','/auth/login','/auth/session','/auth/logout','/health','/ready','/assets/site.css','/assets/studio.html','/activate','/assets/account.html','/auth/activate/start','/auth/activate/confirm'}
-    if private and request.url.path not in public_paths:
+    reader_path = request.url.path
+    reader_get = request.method in ('GET', 'HEAD') and (reader_path in {'/', '/robots.txt', '/sitemap.xml', '/v1/articles'} or re.fullmatch(r'/(?:en|te|hi|ta|kn|ml|mr|ur)(?:/news/[a-z0-9]+(?:-[a-z0-9]+)*)?', reader_path) or re.fullmatch(r'/v1/articles/(?:en|te|hi|ta|kn|ml|mr|ur)/[a-z0-9]+(?:-[a-z0-9]+)*', reader_path))
+    requires_session = protect_routes and reader_path not in public_paths and not (PUBLIC_READER and reader_get)
+    if requires_session:
         try:
             session_guard(request)
         except HTTPException as exc:
@@ -76,8 +90,9 @@ async def security_headers(request, call_next):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['Referrer-Policy'] = 'no-referrer'
-    if STAGING:
-        response.headers['X-Robots-Tag'] = 'noindex, nofollow'
+    if MANAGED_AUTH:
+        if not (PUBLIC_READER and reader_get):
+            response.headers['X-Robots-Tag'] = 'noindex, nofollow'
         response.headers['Cache-Control'] = 'no-store'
     return response
 app.mount('/assets',StaticFiles(directory=str(STATIC)),name='assets')
@@ -88,7 +103,9 @@ def db():
     finally:s.close()
 
 def editor_guard(request: Request, authorization:str|None=Header(default=None)):
-    if STAGING:
+    if MANAGED_AUTH:
+        if PRODUCTION and not session_guard(request)['mfa_enabled']:
+            raise HTTPException(403, 'Enable MFA before accessing the production newsroom')
         from .accounts import require_roles
         if request.method in ('GET','HEAD'):
             return require_roles(request,'admin','editor','reviewer','viewer')
@@ -136,12 +153,13 @@ def ready(session:Session=Depends(db)):
     return {'ok': True}
 
 @app.get('/health')
-def health():return {'ok':True,'service':'agn-api','version':'0.2.0'}
+def health():return {'ok':True,'service':'agn-api','version':app.version}
 
 @app.get('/v1/articles')
 def articles(locale:str='en',q:str='',category:str='',session:Session=Depends(db)):
     if locale not in LOCALES:raise HTTPException(400,'Unsupported language')
     stmt=select(Edition).options(selectinload(Edition.story)).join(Story).where(Edition.locale==locale,Edition.state=='published')
+    if PRODUCTION:stmt=stmt.where(Story.risk!='demo')
     if q:stmt=stmt.where(Edition.headline.ilike(f'%{q[:100]}%'))
     if category:stmt=stmt.where(Story.category==category)
     return [serialize(e) for e in session.scalars(stmt.order_by(Edition.published_at.desc()).limit(100)).all()]
@@ -149,7 +167,7 @@ def articles(locale:str='en',q:str='',category:str='',session:Session=Depends(db
 @app.get('/v1/articles/{locale}/{slug}')
 def article(locale:str,slug:str,session:Session=Depends(db)):
     e=session.scalar(select(Edition).options(selectinload(Edition.sources),selectinload(Edition.story)).where(Edition.locale==locale,Edition.slug==slug,Edition.state=='published'))
-    if not e:raise HTTPException(404,'Story not found')
+    if not e or (PRODUCTION and e.story.risk=='demo'):raise HTTPException(404,'Story not found')
     return serialize(e,True)
 
 @app.get('/v1/editor/editions/{eid}',dependencies=[Depends(editor_guard)])
@@ -176,7 +194,7 @@ def create_draft(p:DraftPayload,request:Request,session:Session=Depends(db)):
     e=Edition(story_id=story.id,locale=p.locale,slug=p.slug,headline=p.headline,body=p.body,state='draft')
     session.add(e);session.flush()
     session.add(Source(edition_id=e.id,publisher=p.source_publisher,url=str(p.source_url)))
-    session.add(AuditEvent(edition_id=e.id,actor=session_guard(request)['actor'] if STAGING else 'editor',action='created'))
+    session.add(AuditEvent(edition_id=e.id,actor=session_guard(request)['actor'] if MANAGED_AUTH else 'editor',action='created'))
     session.commit();return {'edition_id':e.id,'state':'draft'}
 
 @app.put('/v1/editor/editions/{eid}',dependencies=[Depends(editor_guard)])
@@ -190,7 +208,7 @@ def update_draft(eid:int,p:UpdateDraft,request:Request,session:Session=Depends(d
     e.locale=p.locale;e.slug=p.slug;e.headline=p.headline;e.body=p.body;e.story.category=p.category
     source=session.scalar(select(Source).where(Source.edition_id==eid))
     if source:source.publisher=p.source_publisher;source.url=str(p.source_url);source.rights_status='unverified'
-    session.add(AuditEvent(edition_id=eid,actor=session_guard(request)['actor'] if STAGING else 'editor',action='edited'))
+    session.add(AuditEvent(edition_id=eid,actor=session_guard(request)['actor'] if MANAGED_AUTH else 'editor',action='edited'))
     session.commit();return {'edition_id':eid,'state':'draft'}
 
 @app.post('/v1/editor/editions/{eid}/publish',dependencies=[Depends(editor_guard)])
@@ -201,7 +219,7 @@ def publish(eid:int,p:Approval,request:Request,session:Session=Depends(db)):
     if not(p.provenance_reviewed and p.rights_verified and p.accuracy_reviewed):raise HTTPException(409,'All reviews required')
     e.state='published';e.provenance_reviewed=True;e.published_at=datetime.now(timezone.utc)
     for s in session.scalars(select(Source).where(Source.edition_id==eid)):s.rights_status='editor-verified'
-    session.add(AuditEvent(edition_id=eid,actor=session_guard(request)['actor'] if STAGING else p.actor,action='published'))
+    session.add(AuditEvent(edition_id=eid,actor=session_guard(request)['actor'] if MANAGED_AUTH else p.actor,action='published'))
     session.commit();return {'edition_id':eid,'state':'published'}
 
 @app.post('/v1/editor/editions/{eid}/retract',dependencies=[Depends(editor_guard)])
@@ -209,7 +227,7 @@ def retract(eid:int,request:Request,session:Session=Depends(db)):
     e=session.get(Edition,eid)
     if not e:raise HTTPException(404,'Not found')
     if e.state!='published':raise HTTPException(409,'Only published articles can be retracted')
-    e.state='retracted';session.add(AuditEvent(edition_id=eid,actor=session_guard(request)['actor'] if STAGING else 'editor',action='retracted'))
+    e.state='retracted';session.add(AuditEvent(edition_id=eid,actor=session_guard(request)['actor'] if MANAGED_AUTH else 'editor',action='retracted'))
     session.commit();return {'edition_id':eid,'state':'retracted'}
 
 @app.get('/v1/editor/audit',dependencies=[Depends(editor_guard)])
@@ -229,7 +247,7 @@ def robots():return Response('User-agent: *\nDisallow: /studio\nDisallow: /v1/ed
 @app.get('/sitemap.xml')
 def sitemap(session:Session=Depends(db)):
     base=(os.environ.get('PUBLIC_BASE_URL') or os.environ.get('RENDER_EXTERNAL_URL','http://localhost:8000')).rstrip('/')
-    editions=session.scalars(select(Edition).where(Edition.state=='published').limit(10000)).all()
+    editions=session.scalars(select(Edition).join(Story).where(Edition.state=='published', Story.risk!='demo' if PRODUCTION else True).limit(10000)).all()
     urls=''.join(f'<url><loc>{escape(base)}/{e.locale}/news/{escape(e.slug)}</loc></url>' for e in editions)
     return Response('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'+urls+'</urlset>',media_type='application/xml')
 
@@ -245,7 +263,7 @@ def home(locale:str):
 def article_page(locale:str,slug:str,session:Session=Depends(db)):
     if locale not in LOCALES:raise HTTPException(404)
     e=session.scalar(select(Edition).where(Edition.locale==locale,Edition.slug==slug,Edition.state=='published'))
-    if not e:raise HTTPException(404,'Article not found')
+    if not e or (PRODUCTION and e.story.risk=='demo'):raise HTTPException(404,'Article not found')
     template=(STATIC/'article.html').read_text(encoding='utf-8')
     safe_title=escape(e.headline)
     safe_body=''.join(f'<p>{escape(line)}</p>' for line in e.body.split('\n') if line.strip())
