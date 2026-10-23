@@ -37,6 +37,8 @@ jobs:
         run: |
           docker compose -f infra/staging/compose.yml cp https:/data/caddy/pki/authorities/local/root.crt /tmp/agn-root.crt
           sudo python3 scripts/smoke_staging.py
+      - name: Verify production boundaries on disposable PostgreSQL databases
+        run: python3 scripts/check_production_postgres.py
       - name: Create encrypted backup and test disposable restore
         run: |
           docker compose -f infra/staging/compose.yml run --rm backup --once

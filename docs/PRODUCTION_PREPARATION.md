@@ -35,7 +35,10 @@ Automatic deployment remains off. The current live release is unchanged.
 
 ## Remaining launch gates
 
-- Validate this candidate on isolated native PostgreSQL and HTTPS hosting.
+- Run the disposable PostgreSQL production acceptance checks and verify the CI result.
+  Native production checks run through TestClient; actual TLS is checked separately
+  against the disposable staging Docker stack. Hosted production TLS remains a
+  deployment-time check.
 - Complete the real saved-key MFA recovery sign-in test. The embedded database
   restore is useful evidence but does not complete this check.
 - Verify the first scheduled off-provider backup and its failure reporting.
@@ -53,3 +56,10 @@ Automatic deployment remains off. The current live release is unchanged.
 SQLite fixtures to exercise private defaults, explicit launch gating, public
 reader boundaries, demo/draft exclusion, MFA before editorial access, and audit
 identity. These are application tests, not a native Render production drill.
+
+CI runs `scripts/check_production_postgres.py` in the existing disposable Docker
+stack. It creates two temporary logical databases, exercises both private and
+approved-public modes, and removes only those test databases afterward. It
+refuses Render service environments and requires the known Docker CI database.
+Eight-language reader routes, empty-language responses, search and server-rendered
+language/direction attributes are included. No real reporting is published.

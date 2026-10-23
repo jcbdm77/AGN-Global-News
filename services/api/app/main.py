@@ -257,7 +257,9 @@ def root():return (STATIC/'news.html').read_text(encoding='utf-8')
 @app.get('/{locale}',response_class=HTMLResponse)
 def home(locale:str):
     if locale not in LOCALES:raise HTTPException(404)
-    return (STATIC/'news.html').read_text(encoding='utf-8')
+    html=(STATIC/'news.html').read_text(encoding='utf-8')
+    direction='rtl' if locale=='ur' else 'ltr'
+    return html.replace('<html lang="en">',f'<html lang="{locale}" dir="{direction}">')
 
 @app.get('/{locale}/news/{slug}',response_class=HTMLResponse)
 def article_page(locale:str,slug:str,session:Session=Depends(db)):
@@ -265,6 +267,8 @@ def article_page(locale:str,slug:str,session:Session=Depends(db)):
     e=session.scalar(select(Edition).where(Edition.locale==locale,Edition.slug==slug,Edition.state=='published'))
     if not e or (PRODUCTION and e.story.risk=='demo'):raise HTTPException(404,'Article not found')
     template=(STATIC/'article.html').read_text(encoding='utf-8')
+    direction='rtl' if locale=='ur' else 'ltr'
+    template=template.replace('<html lang="%%LOCALE%%">',f'<html lang="%%LOCALE%%" dir="{direction}">')
     safe_title=escape(e.headline)
     safe_body=''.join(f'<p>{escape(line)}</p>' for line in e.body.split('\n') if line.strip())
     base=(os.environ.get('PUBLIC_BASE_URL') or os.environ.get('RENDER_EXTERNAL_URL','http://localhost:8000')).rstrip('/')
