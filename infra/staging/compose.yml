@@ -1,0 +1,71 @@
+name: agn-staging
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agn
+      POSTGRES_USER: agn
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U agn -d agn]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  api:
+    build: ../../services/api
+    restart: unless-stopped
+    user: '10001:10001'
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      APP_ENV: staging
+      STAGING_PRIVATE_ACCESS: required
+      DATABASE_URL_FILE: /run/secrets/database_url
+      STAGING_ADMIN_HASH_FILE: /run/secrets/admin_hash
+      STAGING_ADMIN_USER: admin
+      AUTH_ENCRYPTION_KEY_FILE: /run/secrets/auth_encryption_key
+      PUBLIC_BASE_URL: https://localhost:8443
+    secrets: [database_url, admin_hash, auth_encryption_key]
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  https:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ['127.0.0.1:8443:443']
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api: {condition: service_healthy}
+  backup:
+    build: ./backup
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGUSER: agn
+      PGDATABASE: agn
+    secrets: [db_password, backup_passphrase]
+    volumes: ['./backups:/backups']
+    depends_on:
+      postgres: {condition: service_healthy}
+secrets:
+  db_password: {file: ./secrets/db_password}
+  database_url: {file: ./secrets/database_url}
+  admin_hash: {file: ./secrets/admin_hash}
+  auth_encryption_key: {file: ./secrets/auth_encryption_key}
+  backup_passphrase: {file: ./secrets/backup_passphrase}
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,50 @@
+name: Private staging checks
+on:
+  pull_request:
+  push:
+    branches: [staging-preparation]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r services/api/requirements.lock
+      - run: python -m pytest -q
+        working-directory: services/api
+      - name: Generate disposable CI credentials
+        run: |
+          sudo python3 - <<'PY'
+          import getpass, runpy, secrets, os
+          from pathlib import Path
+          password=secrets.token_urlsafe(32)
+          getpass.getpass=lambda prompt: password
+          Path('/tmp/agn-ci-password').write_text(password)
+          os.chmod('/tmp/agn-ci-password',0o600)
+          runpy.run_path('scripts/prepare_staging.py',run_name='__main__')
+          PY
+      - name: Build and start isolated staging
+        working-directory: infra/staging
+        run: |
+          docker compose -f compose.yml config --quiet
+          docker compose -f compose.yml up -d --build --wait --wait-timeout 180
+      - name: Verify HTTPS, PostgreSQL and private access
+        run: |
+          docker compose -f infra/staging/compose.yml cp https:/data/caddy/pki/authorities/local/root.crt /tmp/agn-root.crt
+          sudo python3 scripts/smoke_staging.py
+      - name: Verify production boundaries on disposable PostgreSQL databases
+        run: python3 scripts/check_production_postgres.py
+      - name: Create encrypted backup and test disposable restore
+        run: |
+          docker compose -f infra/staging/compose.yml run --rm backup --once
+          archive=$(sudo find "$PWD/infra/staging/backups" -name '*.dump.gpg' -type f | sort | tail -1)
+          test -n "$archive"
+          sudo sh scripts/restore_staging.sh "$archive"
+      - name: Cleanup disposable containers
+        if: always()
+        run: docker compose -f infra/staging/compose.yml down -v

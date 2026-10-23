@@ -1,0 +1,38 @@
+# Review-only until billing and sign-in exposure are approved.
+services:
+  - type: web
+    name: agn-staging
+    runtime: docker
+    plan: free
+    region: singapore
+    branch: staging-preparation
+    dockerfilePath: ./services/api/Dockerfile
+    dockerContext: ./services/api
+    dockerCommand: uvicorn app.main:app --host 0.0.0.0 --port 10000 --workers 1 --no-proxy-headers
+    healthCheckPath: /ready
+    autoDeployTrigger: 'off'
+    envVars:
+      - key: APP_ENV
+        value: staging
+      - key: STAGING_PRIVATE_ACCESS
+        value: required
+      - key: STAGING_ADMIN_USER
+        value: admin
+      - key: STAGING_ADMIN_PASSWORD
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: agn-staging-db
+          property: connectionString
+      - key: AUTH_ENCRYPTION_KEY
+        sync: false
+      - key: WEB_CONCURRENCY
+        value: '1'
+databases:
+  - name: agn-staging-db
+    plan: 0.1c-256mb
+    region: singapore
+    postgresMajorVersion: '16'
+    diskSizeGB: 1
+    storageAutoscalingEnabled: false
+    ipAllowList: []
